@@ -1,196 +1,233 @@
---==[ LOOP REJOIN v2 – HOP TERUS + ANTI SERVER SAMA 2 JAM ]==--
-
 if not game:IsLoaded() then
-    game.Loaded:Wait()
+game.Loaded:Wait()
 end
 
-----------------------------------------------------------------------
--- 🔧 KONFIGURASI
-----------------------------------------------------------------------
-local CONFIG = {
-    DelayBeforeCheck      = 8,     -- tunggu world load dulu sebelum cek (detik)
+task.wait(20)
 
-    MinPlayersInfo        = 3,     -- hanya untuk info/log (tidak menghentikan hop)
-    HopDelayRame          = 15,    -- jeda hop kalau server >= MinPlayersInfo
-    HopDelaySepi          = 6,     -- jeda hop kalau server <  MinPlayersInfo
-
-    VisitedFile           = "server-hop-visited.json",
-    VisitedTTLSeconds     = 7200,  -- 2 jam: jangan betah di server yang sama
-    RejoinIfVisitedDelay  = 4,     -- kalau ketemu server yang pernah dikunjungi → rejoin cepat
-
-    MaxTeleportFailures   = 3,     -- kalau teleport gagal berkali-kali, stop spam
-}
-
-----------------------------------------------------------------------
--- SERVICES
-----------------------------------------------------------------------
 local Players         = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 local HttpService     = game:GetService("HttpService")
 
-local placeId      = game.PlaceId
+local LocalPlayer = Players.LocalPlayer
+local placeId     = game.PlaceId         -- ⬅ pakai place yang sedang dimainkan
 local currentJobId = game.JobId
 
-print("[LoopRejoin] Start. PlaceId:", placeId, "| JobId sekarang:", currentJobId)
+--------------------------------------------------------------------
+-- 🔧 KONFIGURASI
+--------------------------------------------------------------------
+local MIN_PLAYERS = 1          -- minimal pemain di server tujuan
+local MAX_PLAYERS = 15         -- maksimal pemain di server tujuan
+local MAX_PAGES   = 5          -- maksimal halaman server yang dicek
+local MAX_TRIES   = 3          -- maksimal percobaan teleport ke server berbeda
+--------------------------------------------------------------------
 
-----------------------------------------------------------------------
--- 🧠 SISTEM VISITED (ANTI SERVER SAMA)
-----------------------------------------------------------------------
-local visited = {}  -- [jobId] = timestamp
+--------------------------------------------------------------------
+-- 📜 LOAD DAFTAR TEMAN
+--------------------------------------------------------------------
+local placeId     = game.PlaceId   -- pakai game / place yang sekarang
 
-local function loadVisited()
-    if not readfile then
-        warn("[LoopRejoin] Executor tidak punya readfile, visited NON-AKTIF (masih tetap hop, tapi tanpa anti-duplicate).")
-        return
-    end
+----------------------------------------------------
+-- 🔧 CONFIG
+----------------------------------------------------
+local MIN_PLAYERS = 1
+local MAX_PLAYERS = 15
+local MAX_PAGES   = 5      -- berapa halaman server dicek
+----------------------------------------------------
 
-    local ok, content = pcall(function()
-        return readfile(CONFIG.VisitedFile)
-    end)
+----------------------------------------------------
+-- 📜 LOAD FRIEND LIST
+----------------------------------------------------
+local FriendIds = {}
 
-    if not ok or not content or content == "" then
-        -- tidak apa-apa, anggap belum ada file
-        return
-    end
+do
+local ok, pagesOrErr = pcall(function()
+return Players:GetFriendsAsync(LocalPlayer.UserId)
+end)
 
-    local okDecode, data = pcall(function()
-        return HttpService:JSONDecode(content)
-    end)
-
-    if okDecode and type(data) == "table" then
-        visited = data
-    else
-        warn("[LoopRejoin] File visited corrupt, reset baru.")
-        visited = {}
-    end
-end
-
-local function saveVisited()
-    if not writefile then return end
-
-    local ok, encoded = pcall(function()
-        return HttpService:JSONEncode(visited)
-    end)
-
-    if not ok then
-        warn("[LoopRejoin] Gagal encode JSON visited:", encoded)
-        return
-    end
-
-    pcall(function()
-        writefile(CONFIG.VisitedFile, encoded)
-    end)
-end
-
-local function cleanupVisited()
-    local now = os.time()
-    local ttl = CONFIG.VisitedTTLSeconds
-    local removed = 0
-
-    for jobId, ts in pairs(visited) do
-        if type(ts) ~= "number" or now - ts > ttl then
-            visited[jobId] = nil
-            removed += 1
-        end
-    end
-
-    if removed > 0 then
-        print(("[LoopRejoin] Hapus %d server lama dari visited."):format(removed))
-        saveVisited()
-    end
-end
-
-local function isRecentlyVisited(jobId)
-    if not jobId then return false end
-    local ts = visited[jobId]
-    if not ts then return false end
-    return (os.time() - ts) <= CONFIG.VisitedTTLSeconds
-end
-
-local function markVisited(jobId)
-    if not jobId then return end
-    visited[jobId] = os.time()
-    saveVisited()
-end
-
-----------------------------------------------------------------------
--- 🔢 FUNGSI JUMLAH PLAYER
-----------------------------------------------------------------------
-local function getPlayerCount()
-    local count = 0
-    -- pcall biar aman kalau ada error aneh
-    pcall(function()
-        count = #Players:GetPlayers()
-    end)
-    return count
-end
-
-----------------------------------------------------------------------
--- 🚀 FUNGSI TELEPORT WRAPPER (BIAR ADA PROTEKSI GAGAL)
-----------------------------------------------------------------------
-local teleportFailures = 0
-
-local function safeTeleport(what, arg1, arg2)
-    local ok, err = pcall(function()
-        if what == "place" then
-            TeleportService:Teleport(arg1)
-        elseif what == "instance" then
-            TeleportService:TeleportToPlaceInstance(arg1, arg2)
-        end
-    end)
-
-    if not ok then
-        teleportFailures += 1
-        warn("[LoopRejoin] Teleport gagal ke", what, ":", err,
-             "| total gagal:", teleportFailures)
-
-        if teleportFailures >= CONFIG.MaxTeleportFailures then
-            warn("[LoopRejoin] Sudah", teleportFailures,
-                 "kali gagal teleport. Stop spam, cek koneksi / Roblox.")
-        end
-    else
-        teleportFailures = 0
-    end
-
-    return ok
-end
-
-----------------------------------------------------------------------
--- 🚀 LOGIKA UTAMA
-----------------------------------------------------------------------
-task.wait(CONFIG.DelayBeforeCheck)
-
-loadVisited()
-cleanupVisited()
-
--- 1) Kalau server ini sudah pernah dikunjungi dalam 2 jam terakhir → REJOIN CEPAT
-if isRecentlyVisited(currentJobId) then
-    warn("[LoopRejoin] Server ini SUDAH ada di visited (<= 2 jam). Rejoin cepat...")
-
-    task.wait(CONFIG.RejoinIfVisitedDelay)
-
-    safeTeleport("place", placeId)
-    return
-end
-
--- 2) Server baru (belum visited ≤ 2 jam): tandai, cek player, lalu tetap hop
-markVisited(currentJobId)
-
-local count = getPlayerCount()
-print(("[LoopRejoin] Server saat ini: %d pemain"):format(count))
-
-local hopDelay
-if count >= CONFIG.MinPlayersInfo then
-    print(("[LoopRejoin] ✅ Rame (>= %d). Akan hop lagi setelah %d detik.")
-        :format(CONFIG.MinPlayersInfo, CONFIG.HopDelayRame))
-    hopDelay = CONFIG.HopDelayRame
+if not ok then
+warn("[ServerHop] Gagal load daftar teman:", pagesOrErr)
 else
-    print(("[LoopRejoin] ⚠️ Sepi (< %d). Akan hop lagi lebih cepat (%d detik).")
-        :format(CONFIG.MinPlayersInfo, CONFIG.HopDelaySepi))
-    hopDelay = CONFIG.HopDelaySepi
+local pages = pagesOrErr
+repeat
+for _, info in ipairs(pages:GetCurrentPage()) do
+FriendIds[info.Id] = true
+end
+until pages.IsFinished or not pcall(function()
+pages:AdvanceToNextPageAsync()
+end)
+end
 end
 
-task.wait(hopDelay)
+local function HasFriendInCurrentServer()
+for _, plr in ipairs(Players:GetPlayers()) do
+if plr ~= LocalPlayer and FriendIds[plr.UserId] then
+return true, plr.Name
+end
+end
+return false
+end
 
-print("[LoopRejoin] 🔁 Teleport ke server lain...")
-safeTeleport("place", placeId)
+local hasFriend, friendName = HasFriendInCurrentServer()
+if hasFriend then
+    warn("[ServerHop] Ada teman di server ini:", friendName, "→ akan cari server lain.")
+    warn("[ServerHop] Ada teman di server ini:", friendName, "→ akan hop ke server lain.")
+else
+print("[ServerHop] Tidak ada teman di server ini.")
+end
+
+--------------------------------------------------------------------
+-- 🌐 AMBIL LIST SERVER DARI API ROBLOX
+--------------------------------------------------------------------
+----------------------------------------------------
+-- 🌐 AMBIL SERVER LIST (TIDAK PAKAI JOBID)
+----------------------------------------------------
+local cursor = nil
+
+local function GetServers()
+local url = ("https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100")
+        :format(placeId)      -- ⬅ TIDAK lagi hardcode
+        :format(placeId)
+
+if cursor then
+url = url .. "&cursor=" .. cursor
+end
+
+local ok, result = pcall(function()
+return game:HttpGet(url)
+end)
+
+if not ok then
+warn("[ServerHop] Gagal ambil server list:", result)
+return nil
+end
+
+local decoded
+local okDecode, errDecode = pcall(function()
+decoded = HttpService:JSONDecode(result)
+end)
+
+if not okDecode then
+warn("[ServerHop] Gagal decode JSON:", errDecode)
+return nil
+end
+
+cursor = decoded.nextPageCursor
+return decoded.data
+end
+
+print(("[ServerHop] Cari server lain... (min %d, max %d pemain)")
+print(("[ServerHop] Cari server... (target %d–%d pemain)")
+:format(MIN_PLAYERS, MAX_PLAYERS))
+print("[ServerHop] Server sekarang JobId:", currentJobId)
+
+--------------------------------------------------------------------
+-- 🔎 KUMPULKAN KANDIDAT SERVER YANG COCOK
+--------------------------------------------------------------------
+----------------------------------------------------
+-- 🔎 KUMPULKAN KANDIDAT (TANPA BEDAIN JOBID)
+----------------------------------------------------
+local candidateServers = {}
+
+for page = 1, MAX_PAGES do
+local servers = GetServers()
+if not servers then break end
+
+for _, server in ipairs(servers) do
+        print(("[ServerHop] Cek server %s | %d/%d pemain"):format(
+        local playing    = server.playing
+        local maxPlayers = server.maxPlayers
+
+        local notFull       = playing < maxPlayers
+        local inRange       = playing >= MIN_PLAYERS and playing <= MAX_PLAYERS
+
+        print(("[ServerHop] Cek %s | %d/%d pemain"):format(
+server.id,
+            server.playing,
+            server.maxPlayers
+            playing,
+            maxPlayers
+))
+
+        local notFull         = server.playing < server.maxPlayers
+        local differentServer = server.id ~= currentJobId
+        local enoughPlayers   = server.playing >= MIN_PLAYERS
+        local notTooMany      = server.playing <= MAX_PLAYERS
+
+        if notFull and differentServer and enoughPlayers and notTooMany then
+        -- 👇 di sini TIDAK ada cek JobId sama sekali
+        if notFull and inRange then
+table.insert(candidateServers, {
+id      = server.id,
+                playing = server.playing,
+                max     = server.maxPlayers,
+                playing = playing,
+                max     = maxPlayers,
+})
+end
+end
+
+if not cursor then
+break
+end
+end
+
+if #candidateServers == 0 then
+    warn("[ServerHop] Tidak ada server yang memenuhi syarat (7–15 pemain & beda JobId).")
+    warn("[ServerHop] Tidak ada server dengan 7–15 pemain yang ditemukan.")
+    -- kalau mau, bisa fallback rejoin biasa:
+    -- TeleportService:Teleport(placeId)
+return
+end
+
+--------------------------------------------------------------------
+-- 🚀 COBA TELEPORT KE BEBERAPA KANDIDAT, HANDLE ERROR 773
+--------------------------------------------------------------------
+local tries = 0
+
+for _, server in ipairs(candidateServers) do
+    if tries >= MAX_TRIES then
+        warn("[ServerHop] Sudah mencapai batas percobaan teleport.")
+        break
+    end
+----------------------------------------------------
+-- 🚀 TELEPORT KE SALAH SATU KANDIDAT (JOBID BEBAS)
+----------------------------------------------------
+local target = candidateServers[math.random(1, #candidateServers)]
+
+    tries = tries + 1
+print(("[ServerHop] Teleport ke server %s (%d/%d pemain)")
+    :format(target.id, target.playing, target.max))
+
+    print(("[ServerHop] Percobaan %d: teleport ke %s (%d/%d pemain)")
+        :format(tries, server.id, server.playing, server.max))
+local okTp, tpErr = pcall(function()
+    TeleportService:TeleportToPlaceInstance(placeId, target.id)
+end)
+
+    local okTp, tpErr = pcall(function()
+        TeleportService:TeleportToPlaceInstance(placeId, server.id)
+    end)
+if not okTp then
+    local errStr = tostring(tpErr)
+    warn("[ServerHop] Teleport gagal:", errStr)
+
+    if not okTp then
+        local errStr = tostring(tpErr)
+        warn("[ServerHop] Teleport gagal:", errStr)
+
+        if errStr:find("773") or errStr:lower():find("restricted") then
+            warn("[ServerHop] Error 773 (tempat / server dibatasi oleh Roblox). " ..
+                 "Script tidak bisa memaksa masuk. Coba server lain.")
+            -- lanjut ke server kandidat berikutnya
+        else
+            -- error lain (misal disconnect), kita juga lanjut ke kandidat lain
+            warn("[ServerHop] Bukan 773, lanjut coba server lain.")
+        end
+    else
+        print("[ServerHop] Teleport berhasil dipanggil, menunggu pindah server...")
+        break -- biasanya setelah ini script berhenti karena pindah place
+    if errStr:find("773") or errStr:lower():find("restricted") then
+        warn("[ServerHop] Error 773 (tempat/server dibatasi oleh Roblox). " ..
+             "Ini batasan dari Roblox, bukan dari script.")
+end
+end
