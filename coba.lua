@@ -1,4 +1,4 @@
---==[ LOOP REJOIN – MAU SEPI MAU RAME TETAP HOP + ANTI SERVER SAMA 2 JAM ]==--
+--==[ LOOP REJOIN v2 – HOP TERUS + ANTI SERVER SAMA 2 JAM ]==--
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -8,14 +8,17 @@ end
 -- 🔧 KONFIGURASI
 ----------------------------------------------------------------------
 local CONFIG = {
-    DelayBeforeCheck      = 8,    -- tunggu world load dulu sebelum cek (detik)
-    MinPlayersInfo        = 3,    -- hanya untuk info/log (tidak menghentikan hop)
-    HopDelayRame          = 15,   -- jeda hop kalau server >= MinPlayersInfo
-    HopDelaySepi          = 6,    -- jeda hop kalau server <  MinPlayersInfo
+    DelayBeforeCheck      = 8,     -- tunggu world load dulu sebelum cek (detik)
+
+    MinPlayersInfo        = 3,     -- hanya untuk info/log (tidak menghentikan hop)
+    HopDelayRame          = 15,    -- jeda hop kalau server >= MinPlayersInfo
+    HopDelaySepi          = 6,     -- jeda hop kalau server <  MinPlayersInfo
 
     VisitedFile           = "server-hop-visited.json",
-    VisitedTTLSeconds     = 7200, -- 2 jam: jangan betah di server yang sama
-    RejoinIfVisitedDelay  = 4,    -- kalau ketemu server yang pernah dikunjungi → rejoin cepat
+    VisitedTTLSeconds     = 7200,  -- 2 jam: jangan betah di server yang sama
+    RejoinIfVisitedDelay  = 4,     -- kalau ketemu server yang pernah dikunjungi → rejoin cepat
+
+    MaxTeleportFailures   = 3,     -- kalau teleport gagal berkali-kali, stop spam
 }
 
 ----------------------------------------------------------------------
@@ -28,7 +31,7 @@ local HttpService     = game:GetService("HttpService")
 local placeId      = game.PlaceId
 local currentJobId = game.JobId
 
-print("[LoopRejoin] Start. JobId sekarang:", currentJobId)
+print("[LoopRejoin] Start. PlaceId:", placeId, "| JobId sekarang:", currentJobId)
 
 ----------------------------------------------------------------------
 -- 🧠 SISTEM VISITED (ANTI SERVER SAMA)
@@ -37,7 +40,7 @@ local visited = {}  -- [jobId] = timestamp
 
 local function loadVisited()
     if not readfile then
-        warn("[LoopRejoin] Executor tidak punya readfile, visited non-aktif.")
+        warn("[LoopRejoin] Executor tidak punya readfile, visited NON-AKTIF (masih tetap hop, tapi tanpa anti-duplicate).")
         return
     end
 
@@ -46,6 +49,7 @@ local function loadVisited()
     end)
 
     if not ok or not content or content == "" then
+        -- tidak apa-apa, anggap belum ada file
         return
     end
 
@@ -68,11 +72,14 @@ local function saveVisited()
         return HttpService:JSONEncode(visited)
     end)
 
-    if ok then
-        pcall(function()
-            writefile(CONFIG.VisitedFile, encoded)
-        end)
+    if not ok then
+        warn("[LoopRejoin] Gagal encode JSON visited:", encoded)
+        return
     end
+
+    pcall(function()
+        writefile(CONFIG.VisitedFile, encoded)
+    end)
 end
 
 local function cleanupVisited()
@@ -88,7 +95,7 @@ local function cleanupVisited()
     end
 
     if removed > 0 then
-        print("[LoopRejoin] Hapus", removed, "server lama dari visited.")
+        print(("[LoopRejoin] Hapus %d server lama dari visited."):format(removed))
         saveVisited()
     end
 end
@@ -110,7 +117,42 @@ end
 -- 🔢 FUNGSI JUMLAH PLAYER
 ----------------------------------------------------------------------
 local function getPlayerCount()
-    return #Players:GetPlayers()
+    local count = 0
+    -- pcall biar aman kalau ada error aneh
+    pcall(function()
+        count = #Players:GetPlayers()
+    end)
+    return count
+end
+
+----------------------------------------------------------------------
+-- 🚀 FUNGSI TELEPORT WRAPPER (BIAR ADA PROTEKSI GAGAL)
+----------------------------------------------------------------------
+local teleportFailures = 0
+
+local function safeTeleport(what, arg1, arg2)
+    local ok, err = pcall(function()
+        if what == "place" then
+            TeleportService:Teleport(arg1)
+        elseif what == "instance" then
+            TeleportService:TeleportToPlaceInstance(arg1, arg2)
+        end
+    end)
+
+    if not ok then
+        teleportFailures += 1
+        warn("[LoopRejoin] Teleport gagal ke", what, ":", err,
+             "| total gagal:", teleportFailures)
+
+        if teleportFailures >= CONFIG.MaxTeleportFailures then
+            warn("[LoopRejoin] Sudah", teleportFailures,
+                 "kali gagal teleport. Stop spam, cek koneksi / Roblox.")
+        end
+    else
+        teleportFailures = 0
+    end
+
+    return ok
 end
 
 ----------------------------------------------------------------------
@@ -127,16 +169,7 @@ if isRecentlyVisited(currentJobId) then
 
     task.wait(CONFIG.RejoinIfVisitedDelay)
 
-    local ok, err = pcall(function()
-        TeleportService:Teleport(placeId)
-    end)
-
-    if not ok then
-        warn("[LoopRejoin] Teleport(placeId) gagal:", err)
-    else
-        print("[LoopRejoin] Teleport rejoin (visited) dikirim.")
-    end
-
+    safeTeleport("place", placeId)
     return
 end
 
@@ -160,10 +193,4 @@ end
 task.wait(hopDelay)
 
 print("[LoopRejoin] 🔁 Teleport ke server lain...")
-local ok, err = pcall(function()
-    TeleportService:Teleport(placeId)
-end)
-
-if not ok then
-    warn("[LoopRejoin] Teleport(placeId) gagal:", err)
-end
+safeTeleport("place", placeId)
